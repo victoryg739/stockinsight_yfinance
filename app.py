@@ -9,7 +9,7 @@ def restructure_data(df):
     restructured_data = {}
     
     for column in df.columns:
-        date_str = column.strftime('%Y-%m-%d %H:%M:%S')
+        date_str = column.strftime('%Y-%m-%d')
         restructured_data[date_str] = {}
         for index, value in df[column].items():
             if pd.notna(value):  # Only include non-NaN values
