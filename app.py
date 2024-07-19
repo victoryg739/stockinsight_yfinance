@@ -6,14 +6,19 @@ from collections import defaultdict
 app = Flask(__name__)
 
 def restructure_data(df):
-    restructured_data = {}
+    restructured_data = []
     
     for column in df.columns:
         date_str = column.strftime('%Y-%m-%d')
-        restructured_data[date_str] = {}
+        period_data = {"date": date_str, "values": {}}
         for index, value in df[column].items():
             if pd.notna(value):  # Only include non-NaN values
-                restructured_data[date_str][index] = float(value)
+                period_data["values"][index] = float(value)
+        restructured_data.append(period_data)
+    
+    # Sort the array by date, most recent first
+    restructured_data.sort(key=lambda x: x["date"], reverse=True)
+    
     return restructured_data
 
 @app.route('/stock_info/<ticker_symbol>')
