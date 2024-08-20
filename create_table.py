@@ -12,8 +12,8 @@ CREATE TABLE data_last_update (
     PRIMARY KEY (data_name)
 ) """
 
-tax_rate_sql = """
-CREATE TABLE tax_rate (
+effective_tax_rate_sql = """
+CREATE TABLE effective_tax_rate (
     industry varchar(255),
     no_of_firms varchar(255),
     total_taxable_income varchar(255),
@@ -89,5 +89,62 @@ ebit_growth_sql = """CREATE TABLE ebit_growth (
     PRIMARY KEY (industry)
     )"""
 
+default_spread_large_firm_sql = """CREATE TABLE default_spread_large_firm (
+    min varchar(255),
+    max varchar(255),
+    rating varchar(255),
+    spread varchar(255),
+    PRIMARY KEY (rating)
+    )"""
 
-db_handler.execute_query(ebit_growth_sql)
+default_spread_small_firm_sql = """CREATE TABLE default_spread_small_firm (
+    min varchar(255),
+    max varchar(255),
+    rating varchar(255),
+    spread varchar(255),
+    PRIMARY KEY (rating)
+    )"""
+
+input_stats_sql = """
+CREATE TABLE input_stats(
+ industry TEXT PRIMARY KEY,
+    count INTEGER,
+    revenue_growth_rate_first_quartile REAL,
+    revenue_growth_rate_median REAL,
+    revenue_growth_rate_third_quartile REAL,
+    pre_tax_operating_margin_first_quartile REAL,
+    pre_tax_operating_margin_median REAL,
+    pre_tax_operating_margin_third_quartile REAL,
+    sales_to_invested_capital_first_quartile REAL,
+    sales_to_invested_capital_median REAL,
+    sales_to_invested_capital_third_quartile REAL,
+    cost_of_capital_first_quartile REAL,
+    cost_of_capital_median REAL,
+    cost_of_capital_third_quartile REAL,
+    beta_first_quartile REAL,
+    beta_median REAL,
+    beta_third_quartile REAL,
+    debt_to_capital_ratio_first_quartile REAL,
+    debt_to_capital_ratio_median REAL,
+    debt_to_capital_ratio_third_quartile REAL
+)
+"""
+
+
+valuation_sql = """
+CREATE TABLE valuation (
+    id SERIAL PRIMARY KEY,
+    symbol VARCHAR(50),                -- Symbol of the stock
+    email VARCHAR(50),                 -- Email associated with the valuation
+    inputs JSONB,                      -- JSON data containing input values
+    fetched_inputs JSONB,              -- JSON data containing fetched inputs
+    stock_info JSONB,                  -- JSON data containing stock information
+    valuation_model JSONB,             -- JSON data containing valuation model
+    valuation_output JSONB,            -- JSON data containing valuation output
+    implied_share_price DECIMAL(10, 2),-- Implied share price of the stock
+    description TEXT,                  -- Description of the valuation
+    valued_date INTEGER                -- EpochTime
+)
+"""
+
+db_handler.execute_query(valuation_sql)

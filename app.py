@@ -10,7 +10,8 @@ from datetime import datetime
 from data_helper import *
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
-
+from datetime import date, timedelta
+import random
 app = Flask(__name__)
 
 def restructure_data(df):
@@ -81,6 +82,9 @@ def get_quarterly_cash_flow(ticker_symbol):
     restructured_data = restructure_data(cash_flow)
     return jsonify(restructured_data)
 
+@app.route("/test")
+def test():
+    return jsonify(random.randint(0,10000))
 
 @app.route('/update_country_risk_premium')
 def update_country_risk_premium():
@@ -135,8 +139,8 @@ def update_country_risk_premium():
 
     return jsonify({"status": "Data inserted successfully"})
 
-@app.route('/update_tax_rate')
-def update_tax_rates_sector():
+@app.route('/update_effective_tax_rate')
+def update_effective_tax_rate():
     data_tuples, error = clean_taxRate_table()
     if error:
         return jsonify({"error": error}), 400
@@ -148,7 +152,7 @@ def update_tax_rates_sector():
 
     # Connect to the database
     db_handler.connect()
-    db_last_update = db_handler.fetch_query("""SELECT last_update FROM data_last_update WHERE data_name = 'tax_rate' """)
+    db_last_update = db_handler.fetch_query("""SELECT last_update FROM data_last_update WHERE data_name = 'effective_tax_rate' """)
     if db_last_update:
        db_last_update = db_last_update[0][0]
     else:
@@ -156,12 +160,12 @@ def update_tax_rates_sector():
     if last_update > db_last_update:
         try:
             # Truncate the table
-            truncate_query = "TRUNCATE TABLE tax_rate"
+            truncate_query = "TRUNCATE TABLE effective_tax_rate"
             db_handler.execute_query(truncate_query)
 
             # Define SQL insert query
             insert_query_crp = """
-            INSERT INTO tax_rate VALUES (%s, %s, %s, %s, %s, %s, %s,%s,%s,%s,%s)
+            INSERT INTO effective_tax_rate VALUES (%s, %s, %s, %s, %s, %s, %s,%s,%s,%s,%s)
             """
             # Insert data into the database
             db_handler.execute_query_many(insert_query_crp, data_tuples)
@@ -169,7 +173,7 @@ def update_tax_rates_sector():
             update_query_data_last_update = f"""
             UPDATE data_last_update
             SET last_update = '{last_update}'
-            WHERE data_name = 'tax_rate'
+            WHERE data_name = 'effective_tax_rate'
             """
             db_handler.execute_query(update_query_data_last_update)
 
@@ -452,70 +456,143 @@ def update_ebit_growth():
     return jsonify({"status": "Data inserted successfully"})
 
 
+@app.route('/update_default_spread')
+def update_default_spread():
+    data_tuple_big_firm,data_tuple_small_firm, error = clean_default_spread()
+    print(data_tuple_big_firm)
+    if error:
+        return jsonify({"error": error}), 400
 
 
-# Scheduler setup
-scheduler = BackgroundScheduler()
+    # Create an instance of DatabaseHandler
+    db_handler = DatabaseHandler()
 
-# Add each update function as a separate job
-scheduler.add_job(
-    func=update_country_risk_premium,
-    trigger=IntervalTrigger(days=1),
-    id='update_country_risk_premium',
-    name='Update country risk premium every day',
-    replace_existing=True
-)
+    # Connect to the database
+    db_handler.connect()
+    db_last_update = db_handler.fetch_query("""SELECT last_update FROM data_last_update WHERE data_name = 'default_spread' """)
+    if db_last_update:
+       db_last_update = db_last_update[0][0]
+    else:
+        return jsonify({"status": "Error getting last_update from table data_last_update"})
 
-scheduler.add_job(
-    func=update_tax_rates_sector,
-    trigger=IntervalTrigger(days=1),
-    id='update_tax_rates_sector',
-    name='Update tax rates sector every day',
-    replace_existing=True
-)
 
-scheduler.add_job(
-    func=update_sales_to_cap_us,
-    trigger=IntervalTrigger(days=1),
-    id='update_sales_to_cap_us',
-    name='Update sales to cap US every day',
-    replace_existing=True
-)
+    current_date = date.today()
+    if current_date - db_last_update > timedelta(days=30):
+        try:
+            # Truncate the table
+            truncate_query_1 = "TRUNCATE TABLE default_spread_large_firm"
+            db_handler.execute_query(truncate_query_1)
+            truncate_query_2 = "TRUNCATE TABLE default_spread_small_firm"
+            db_handler.execute_query(truncate_query_2)
 
-scheduler.add_job(
-    func=update_beta_us,
-    trigger=IntervalTrigger(days=1),
-    id='update_beta_us',
-    name='Update beta US every day',
-    replace_existing=True
-)
+            # Define SQL insert query
+            insert_query_1= """
+            INSERT INTO default_spread_large_firm VALUES (%s, %s, %s, %s)
+            """
+            # Insert data into the database
+            db_handler.execute_query_many(insert_query_1, data_tuple_big_firm)
 
-scheduler.add_job(
-    func=update_pe_ratio_us,
-    trigger=IntervalTrigger(days=1),
-    id='update_pe_ratio_us',
-    name='Update PE ratio US every day',
-    replace_existing=True
-)
+            # Define SQL insert query
+            insert_query_2= """
+            INSERT INTO default_spread_small_firm VALUES (%s, %s, %s, %s)
+            """
+            # Insert data into the database
+            db_handler.execute_query_many(insert_query_2, data_tuple_small_firm)
 
-scheduler.add_job(
-    func=update_rev_growth_rate,
-    trigger=IntervalTrigger(days=1),
-    id='update_rev_growth_rate',
-    name='Update revenue growth rate every day',
-    replace_existing=True
-)
+            update_query_data_last_update = f"""
+            UPDATE data_last_update
+            SET last_update = '{current_date}'
+            WHERE data_name = 'default_spread'
+            """
+            db_handler.execute_query(update_query_data_last_update)
 
-scheduler.add_job(
-    func=update_ebit_growth,
-    trigger=IntervalTrigger(seconds=60),
-    id='update_ebit_growth',
-    name='Update EBIT growth every day',
-    replace_existing=True
-)
+        except Exception as e:
+            print(f"An error occurred: {e}")
+            db_handler.rollback()
+    else:
+        # Close the connection
+        db_handler.close()
+        return jsonify({"status": "Data is the same"})
 
-# Start the scheduler
-scheduler.start()
+
+    # Close the connection
+    db_handler.close()
+
+    return jsonify({"status": "Data inserted successfully"})
+
+
+
+
+# # Scheduler setup
+# scheduler = BackgroundScheduler()
+
+# # Add each update function as a separate job
+# scheduler.add_job(
+#     func=update_country_risk_premium,
+#     trigger=IntervalTrigger(seconds=60),
+#     id='update_country_risk_premium',
+#     name='Update country risk premium every day',
+#     replace_existing=True
+# )
+
+# scheduler.add_job(
+#     func=update_effective_tax_rate,
+#     trigger=IntervalTrigger(seconds=60),
+#     id='update_tax_rates_sector',
+#     name='Update tax rates sector every day',
+#     replace_existing=True
+# )
+
+# scheduler.add_job(
+#     func=update_sales_to_cap_us,
+#     trigger=IntervalTrigger(seconds=60),
+#     id='update_sales_to_cap_us',
+#     name='Update sales to cap US every day',
+#     replace_existing=True
+# )
+
+# scheduler.add_job(
+#     func=update_beta_us,
+#     trigger=IntervalTrigger(seconds=60),
+#     id='update_beta_us',
+#     name='Update beta US every day',
+#     replace_existing=True
+# )
+
+# scheduler.add_job(
+#     func=update_pe_ratio_us,
+#     trigger=IntervalTrigger(seconds=60),
+#     id='update_pe_ratio_us',
+#     name='Update PE ratio US every day',
+#     replace_existing=True
+# )
+
+# scheduler.add_job(
+#     func=update_rev_growth_rate,
+#     trigger=IntervalTrigger(seconds=60),
+#     id='update_rev_growth_rate',
+#     name='Update revenue growth rate every day',
+#     replace_existing=True
+# )
+
+# scheduler.add_job(
+#     func=update_ebit_growth,
+#     trigger=IntervalTrigger(seconds=60),
+#     id='update_ebit_growth',
+#     name='Update EBIT growth every day',
+#     replace_existing=True
+# )
+
+# scheduler.add_job(
+#     func=update_default_spread,
+#     trigger=IntervalTrigger(seconds=60),
+#     id='update_default_spread',
+#     name='Update default spread every day',
+#     replace_existing=True
+# )
+
+# # Start the scheduler
+# scheduler.start()
 
 # Ensure Flask app runs
 if __name__ == '__main__':
