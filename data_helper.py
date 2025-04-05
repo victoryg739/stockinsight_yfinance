@@ -24,16 +24,24 @@ def clean_crp_table():
 
         # Use pandas to read the HTML content and extract tables
         tables = pd.read_html(html_content)
+  
         
-        # Assume the first table is the one we need
-        df = tables[0]
+        # Assume the second table is the one we need
+        df = tables[1]
 
         # Basic data validation
         if df.empty:
             return None, "DataFrame is empty"
 
         # Check for expected number of columns
-        expected_columns = 7  # Adjust this number based on your table structure
+        expected_columns = 6  # Adjust this number based on your table structure
+       
+
+        
+        print("DataFrame shape:", df.shape)
+        print("DataFrame columns:", df.columns.tolist())
+        print("DataFrame head with all columns:\n", df)
+        print(df)
         if len(df.columns) != expected_columns:
             return None, f"Unexpected number of columns. Expected {expected_columns}, got {len(df.columns)}"
         
@@ -395,7 +403,7 @@ def clean_default_spread():
         df.iloc[:, 0] = df.iloc[:, 0].apply(clean_string)
 
         # Remove % signs and convert to float where applicable
-        df = df.applymap(lambda x: x.replace('%', '').strip() if isinstance(x, str) else x)
+        df = df.map(lambda x: x.replace('%', '').strip() if isinstance(x, str) else x)
         
         # Convert DataFrame to list of tuples
         data_tuples = [tuple(x) for x in df.to_numpy()]
@@ -404,7 +412,7 @@ def clean_default_spread():
         # Remove first row
         data_tuples = data_tuples[3:]
 
-           # Find the index of the (nan, nan, nan, nan) tuple
+        # Find the index of the (nan, nan, nan, nan) tuple
         split_index = next((i for i, t in enumerate(data_tuples) if all(isinstance(x, float) and math.isnan(x) for x in t)), None)
 
         # Split the list

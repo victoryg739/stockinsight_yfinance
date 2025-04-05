@@ -35,10 +35,16 @@ def get_stock_info(ticker_symbol):
     ticker = yf.Ticker(ticker_symbol)
     return jsonify(ticker.info)
 
-@app.route('/calender/<ticker_symbol>')
-def get_calender(ticker_symbol):
-    ticker = yf.Ticker(ticker_symbol)
-    return jsonify(ticker.calendar)
+@app.route('/stock_info/tnx')
+def get_stock_info_tnx():
+    ticker = yf.Ticker("^TNX")
+    return jsonify(ticker.info)
+
+# deprecated
+# @app.route('/calender/<ticker_symbol>')
+# def get_calender(ticker_symbol):
+#     ticker = yf.Ticker(ticker_symbol)
+#     return jsonify(ticker.calendar)
 
 @app.route('/annual_income_statement/<ticker_symbol>')
 def get_annual_income_statement(ticker_symbol):
@@ -82,9 +88,22 @@ def get_quarterly_cash_flow(ticker_symbol):
     restructured_data = restructure_data(cash_flow)
     return jsonify(restructured_data)
 
-@app.route("/test")
-def test():
-    return jsonify(random.randint(0,10000))
+
+#has issues with EPS both basic and diluted
+@app.route('/ttm_income_statement/<ticker_symbol>')
+def get_ttm_income_statement(ticker_symbol):
+    ticker = yf.Ticker(ticker_symbol)
+    income_statement = ticker.ttm_income_stmt
+    print(income_statement)
+    return income_statement.to_json()  
+
+@app.route('/ttm_cash_flow/<ticker_symbol>')
+def get_cash_flow(ticker_symbol):
+    ticker = yf.Ticker(ticker_symbol)
+    cash_flow = ticker.ttm_cashflow
+    print(cash_flow)
+    return cash_flow.to_json()  
+
 
 @app.route('/update_country_risk_premium')
 def update_country_risk_premium():
@@ -113,7 +132,7 @@ def update_country_risk_premium():
 
             # Define SQL insert query
             insert_query_crp = """
-            INSERT INTO country_risk_premium VALUES (%s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO country_risk_premium VALUES (%s, %s, %s, %s, %s, %s)
             """
             # Insert data into the database
             db_handler.execute_query_many(insert_query_crp, data_tuples)
@@ -459,10 +478,16 @@ def update_ebit_growth():
 @app.route('/update_default_spread')
 def update_default_spread():
     data_tuple_big_firm,data_tuple_small_firm, error = clean_default_spread()
-    print(data_tuple_big_firm)
     if error:
         return jsonify({"error": error}), 400
 
+    # Create structured tuples that match your database schema
+    # Assuming you only need the first 4 elements from each tuple
+    processed_big_firm = [(row[0], row[1], row[2], row[3]) for row in data_tuple_big_firm]
+    processed_small_firm = [(row[0], row[1], row[2], row[3]) for row in data_tuple_small_firm]
+    
+    print("Processed big firm data:", processed_big_firm[:2])  # Print first 2 for verification
+    print("Processed small firm data:", processed_small_firm[:2])
 
     # Create an instance of DatabaseHandler
     db_handler = DatabaseHandler()
@@ -490,14 +515,14 @@ def update_default_spread():
             INSERT INTO default_spread_large_firm VALUES (%s, %s, %s, %s)
             """
             # Insert data into the database
-            db_handler.execute_query_many(insert_query_1, data_tuple_big_firm)
+            db_handler.execute_query_many(insert_query_1, processed_big_firm) 
 
             # Define SQL insert query
             insert_query_2= """
             INSERT INTO default_spread_small_firm VALUES (%s, %s, %s, %s)
             """
             # Insert data into the database
-            db_handler.execute_query_many(insert_query_2, data_tuple_small_firm)
+            db_handler.execute_query_many(insert_query_2, processed_small_firm)  
 
             update_query_data_last_update = f"""
             UPDATE data_last_update
