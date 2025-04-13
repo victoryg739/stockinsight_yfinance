@@ -104,6 +104,43 @@ def get_cash_flow(ticker_symbol):
     print(cash_flow)
     return cash_flow.to_json()  
 
+@app.route('/currency_conversion/<source_currency>/<target_currency>/<start_date>/<end_date>')
+def get_currency_conversion(source_currency, target_currency, start_date, end_date):
+    # Format the currency pair for Yahoo Finance
+    currency_pair = f"{source_currency}{target_currency}=X"
+    
+    try:
+        # Get ticker for the currency pair
+        ticker = yf.Ticker(currency_pair)
+        
+        # Fetch historical data
+        historical_data = ticker.history(start=start_date, end=end_date)
+        
+        if historical_data.empty:
+            return jsonify({"error": "No data found for this currency pair or date range"}), 404
+        
+        # Process the data into the same format as other endpoints
+        restructured_data = []
+        
+        for date, row in historical_data.iterrows():
+            date_str = date.strftime('%Y-%m-%d')
+            
+            # Create an object with date and values
+            period_data = {"date": date_str, "values": {}}
+            
+            # Add non-NaN values to the values object
+            for column, value in row.items():
+                if pd.notna(value):  # Only include non-NaN values
+                    period_data["values"][column] = float(value)
+            
+            restructured_data.append(period_data)
+        
+        # Sort the array by date, most recent first
+        restructured_data.sort(key=lambda x: x["date"], reverse=True)
+        
+        return jsonify(restructured_data)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/update_country_risk_premium')
 def update_country_risk_premium():
