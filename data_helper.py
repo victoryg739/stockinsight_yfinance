@@ -41,7 +41,6 @@ def clean_crp_table():
         print("DataFrame shape:", df.shape)
         print("DataFrame columns:", df.columns.tolist())
         print("DataFrame head with all columns:\n", df)
-        print(df)
         if len(df.columns) != expected_columns:
             return None, f"Unexpected number of columns. Expected {expected_columns}, got {len(df.columns)}"
         
@@ -185,7 +184,6 @@ def clean_beta_us():
         if df.empty:
             return None, "DataFrame is empty"
 
-        print(df)
         # Check for expected number of columns
         expected_columns = 7  # Adjust this number based on your table structure
         if len(df.columns) != expected_columns:
@@ -471,3 +469,52 @@ def getLastUpdate_crp(url,textToFind):
         date_obj = datetime.strptime(date_part, "%B %d, %Y").date()
         return(date_obj)
     return None
+
+
+def clean_roic_table():
+    try:
+        # URL of the page
+        url = "https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/fundgrEB.html"
+
+        # Fetch the webpage content
+        response = requests.get(url, verify=False)
+        response.raise_for_status()  # Ensure we notice bad responses
+
+        # Parse the HTML content
+        soup = BeautifulSoup(response.text, 'html.parser')
+
+        # Wrap the HTML content in StringIO
+        html_content = StringIO(response.text)
+
+        # Use pandas to read the HTML content and extract tables
+        tables = pd.read_html(html_content)
+        
+        # Assume the first table is the one we need
+        df = tables[0]
+
+        # Basic data validation
+        if df.empty:
+            return None, "DataFrame is empty"
+
+        # Check for expected number of columns
+        expected_columns = 5  # Adjust this number based on your table structure
+        if len(df.columns) != expected_columns:
+            return None, f"Unexpected number of columns. Expected {expected_columns}, got {len(df.columns)}"
+
+        # Apply the function to clean the industry column
+        df.iloc[:, 0] = df.iloc[:, 0].apply(clean_string)
+
+        # Remove % signs and convert to float where applicable
+        df = df.applymap(lambda x: x.replace('%', '').strip() if isinstance(x, str) else x)
+        
+        # Convert DataFrame to list of tuples
+        data_tuples = [tuple(x) for x in df.to_numpy()]
+
+        # Remove first row
+        data_tuples = data_tuples[1:]
+        print(data_tuples)
+        
+        return data_tuples, None
+
+    except Exception as e:
+        return None, str(e)

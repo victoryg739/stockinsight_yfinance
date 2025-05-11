@@ -20,11 +20,11 @@ CREATE TABLE effective_tax_rate (
     total_taxes_paid_accrual varchar(255),
     total_cash_taxes_paid varchar(255),
     cash_taxes_accrual_taxes varchar(255),
-    effectiveTR_avg_across_all_comp varchar(255),
-    effectiveTR_avg_across_money_making_comp varchar(255),
-    effectiveTR_agg_tax_rate varchar(255),
-    cashTR_avg_across_money_making_comp varchar(255),
-    cashTR_agg_tax_rate varchar(255),
+     effectivetr_avg_across_all_comp varchar(255),
+    effectivetr_avg_across_money_making_comp varchar(255),
+    effectivetr_agg_tax_rate varchar(255),
+    cashtr_avg_across_money_making_comp varchar(255),
+    cashtr_agg_tax_rate varchar(255),
     PRIMARY KEY (industry)
 ) """
 
@@ -38,7 +38,7 @@ CREATE TABLE sales_to_cap_us (
     acquisitions varchar(255),
     net_r_and_d varchar(255),
     net_capex_sales varchar(255),
-    net_capex_ebit_afterTax varchar(255),
+    net_capex_ebit_aftertax varchar(255),
     sales_invested_capital varchar(255),
     PRIMARY KEY (industry)
 ) """
@@ -142,9 +142,32 @@ CREATE TABLE valuation (
     valuation_model JSONB,             -- JSON data containing valuation model
     valuation_output JSONB,            -- JSON data containing valuation output
     implied_share_price DECIMAL(10, 2),-- Implied share price of the stock
+    roic_data  JSONB,
     description TEXT,                  -- Description of the valuation
     valued_date INTEGER                -- EpochTime
 )
 """
+
+roic_sql = """CREATE TABLE roic (
+    industry varchar(255),
+    no_of_firms varchar(255),
+    roc varchar(255),
+    reinvestment_rate varchar(255),
+    expected_growth_ebit varchar(255),
+    PRIMARY KEY (industry)
+    )"""
+
+country_risk__premium_sql = """CREATE TABLE country_risk_premium (
+    country varchar(255),
+    adj_default_spread varchar(255),
+    equity_risk_premium varchar(255),
+    country_risk_premium varchar(255),
+    corporate_tax_rate varchar(255),
+    moody_rating varchar(255),
+    PRIMARY KEY (country)
+)"""
+
+
+
 
 db_handler.execute_query(valuation_sql)

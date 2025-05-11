@@ -582,9 +582,132 @@ def update_default_spread():
 
     return jsonify({"status": "Data inserted successfully"})
 
+@app.route('/update_roic')
+def update_roic():
+    data_tuples, error = clean_roic_table()
+    if error:
+        return jsonify({"error": error}), 400
 
+    last_update = getLastUpdate("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/fundgrEB.html", "Last updated in")
 
+    # Create an instance of DatabaseHandler
+    db_handler = DatabaseHandler()
 
+    # Connect to the database
+    db_handler.connect()
+    db_last_update = db_handler.fetch_query("""SELECT last_update FROM data_last_update WHERE data_name = 'roic' """)
+    print(db_last_update)
+    if db_last_update:
+       db_last_update = db_last_update[0][0]
+    else:
+        return jsonify({"status": "Error getting last_update from table data_last_update"})
+    
+    if last_update > db_last_update:
+        try:
+            # Truncate the table
+            truncate_query = "TRUNCATE TABLE roic"
+            db_handler.execute_query(truncate_query)
+
+            # Define SQL insert query
+            insert_query_roic = """
+            INSERT INTO roic VALUES (%s, %s, %s, %s, %s)
+            """
+            # Insert data into the database
+            db_handler.execute_query_many(insert_query_roic, data_tuples)
+
+            update_query_data_last_update = f"""
+            UPDATE data_last_update
+            SET last_update = '{last_update}'
+            WHERE data_name = 'roic'
+            """
+            db_handler.execute_query(update_query_data_last_update)
+
+        except Exception as e:
+            print(f"An error occurred: {e}")
+            db_handler.rollback()
+    else:
+        # Close the connection
+        db_handler.close()
+        return jsonify({"status": "Data is the same"})
+
+    # Close the connection
+    db_handler.close()
+
+    return jsonify({"status": "Data inserted successfully"})
+
+@app.route('/init/last-update')
+def initialize_last_update():
+    try:
+        # Connect to the database
+        db_handler = DatabaseHandler()
+        db_handler.connect()
+        
+        # Define the tables that need tracking
+        tables = [
+            'beta_us',
+            'country_risk_premium',
+            'ebit_growth',
+            'pe_ratio_us',
+            'rev_growth_rate',
+            'sales_to_cap_us',
+            'effective_tax_rate',
+            'default_spread_large_firm',
+            'default_spread_small_firm',
+            'input_stats',
+            'roic',
+            'default_spread'
+        ]
+        
+        # Ensure data_last_update table exists
+        create_table_sql = """
+        CREATE TABLE IF NOT EXISTS data_last_update (
+            data_name varchar(255),
+            last_update date,
+            PRIMARY KEY (data_name)
+        )
+        """
+        db_handler.execute_query(create_table_sql)
+        
+        # Set a default early date for all tables
+        default_date = '2023-01-01'
+        
+        # Insert or update records for each table
+        for table_name in tables:
+            # Check if entry exists
+            check_sql = "SELECT COUNT(*) FROM data_last_update WHERE data_name = %s"
+            # Assuming execute_query returns a cursor or result directly
+            result = db_handler.execute_query(check_sql, (table_name,))
+            
+            # Get the count value - adjust this based on how your DatabaseHandler returns results
+            count = 0
+            if result:
+                # This might need adjustment based on how results are returned
+                first_row = result[0] if isinstance(result, list) else next(result, None)
+                if first_row:
+                    count = first_row[0]
+            
+            if count > 0:
+                # Update existing record
+                update_sql = "UPDATE data_last_update SET last_update = %s WHERE data_name = %s"
+                db_handler.execute_query(update_sql, (default_date, table_name))
+            else:
+                # Insert new record
+                insert_sql = "INSERT INTO data_last_update (data_name, last_update) VALUES (%s, %s)"
+                db_handler.execute_query(insert_sql, (table_name, default_date))
+        
+        # Close the connection
+        db_handler.close()
+        
+        return jsonify({
+            'status': 'success',
+            'message': f'Successfully initialized last_update dates to {default_date} for all tables'
+        }), 200
+        
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
 # # Scheduler setup
 # scheduler = BackgroundScheduler()
 
