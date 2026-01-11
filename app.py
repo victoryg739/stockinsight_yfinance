@@ -16,12 +16,13 @@ import logging
 from functools import wraps
 
 # Configure logging
+# Note: Vercel has a read-only file system, so we can't write to files
+# Logs will only go to stdout (visible in Vercel logs)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('app.log'),
-        logging.StreamHandler()
+        logging.StreamHandler()  # Only use StreamHandler for Vercel
     ]
 )
 logger = logging.getLogger(__name__)
