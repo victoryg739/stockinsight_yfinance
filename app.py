@@ -12,7 +12,183 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from datetime import date, timedelta
 import random
+import logging
+from functools import wraps
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('app.log'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
 app = Flask(__name__)
+
+# Error handling decorator
+def handle_errors(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        try:
+            return f(*args, **kwargs)
+        except Exception as e:
+            logger.error(f"Error in {f.__name__}: {str(e)}", exc_info=True)
+            return jsonify({"error": f"An error occurred: {str(e)}"}), 500
+    return decorated_function
+
+# Input validation functions
+def validate_ticker_symbol(ticker):
+    """Validate ticker symbol format"""
+    import re
+    # Allow alphanumeric characters, dots, hyphens, and carets (for indices like ^TNX)
+    if not ticker or not re.match(r'^[\^A-Za-z0-9.-]{1,10}$', ticker):
+        raise ValueError(f"Invalid ticker symbol: {ticker}")
+    return ticker.upper()
+
+def validate_date_format(date_str):
+    """Validate date string in YYYY-MM-DD format"""
+    try:
+        datetime.strptime(date_str, '%Y-%m-%d')
+        return date_str
+    except ValueError:
+        raise ValueError(f"Invalid date format: {date_str}. Expected YYYY-MM-DD")
+
+def validate_currency_code(currency):
+    """Validate currency code (3 letters)"""
+    import re
+    if not currency or not re.match(r'^[A-Z]{3}$', currency.upper()):
+        raise ValueError(f"Invalid currency code: {currency}. Expected 3-letter code (e.g., USD)")
+    return currency.upper()
+
+# Reusable database update function
+def update_database_table(
+    table_name,
+    data_name,
+    clean_function,
+    last_update_function,
+    last_update_url,
+    last_update_text,
+    insert_query,
+    use_time_delta=False,
+    delta_days=30
+):
+    """
+    Generic function to update database tables with scraped data
+
+    Args:
+        table_name: Name of the table to update
+        data_name: Name in data_last_update table
+        clean_function: Function to clean and fetch data
+        last_update_function: Function to get last update date
+        last_update_url: URL to check for updates
+        last_update_text: Text to search for in update check
+        insert_query: SQL insert query
+        use_time_delta: If True, use time delta instead of date comparison
+        delta_days: Number of days for time delta check
+    """
+    logger.info(f"Starting update for {table_name}")
+
+    # Clean and fetch data
+    result = clean_function()
+
+    # Handle functions that return multiple data sets (like default_spread)
+    if isinstance(result, tuple) and len(result) == 3:
+        data_tuple_1, data_tuple_2, error = result
+        if error:
+            logger.error(f"Error cleaning data for {table_name}: {error}")
+            return jsonify({"error": error}), 400
+        # Process the data (first 4 elements only for default_spread)
+        data_tuple_1 = [(row[0], row[1], row[2], row[3]) for row in data_tuple_1]
+        data_tuple_2 = [(row[0], row[1], row[2], row[3]) for row in data_tuple_2]
+    else:
+        data_tuples, error = result
+        if error:
+            logger.error(f"Error cleaning data for {table_name}: {error}")
+            return jsonify({"error": error}), 400
+
+    # Get last update date
+    if use_time_delta:
+        last_update = date.today()
+    else:
+        try:
+            last_update = last_update_function(last_update_url, last_update_text)
+            if not last_update:
+                logger.warning(f"Could not get last update for {table_name}")
+                return jsonify({"error": "Could not retrieve last update date"}), 400
+        except Exception as e:
+            logger.error(f"Error getting last update for {table_name}: {str(e)}")
+            return jsonify({"error": f"Error getting last update: {str(e)}"}), 500
+
+    # Database operations
+    db_handler = None
+    try:
+        db_handler = DatabaseHandler()
+        db_handler.connect()
+
+        # Get database last update
+        db_last_update = db_handler.fetch_query(
+            f"SELECT last_update FROM data_last_update WHERE data_name = '{data_name}'"
+        )
+
+        if not db_last_update:
+            logger.error(f"Error getting last_update from table data_last_update for {data_name}")
+            return jsonify({"status": f"Error getting last_update from table data_last_update"}), 500
+
+        db_last_update = db_last_update[0][0]
+
+        # Check if update is needed
+        should_update = False
+        if use_time_delta:
+            should_update = (last_update - db_last_update) > timedelta(days=delta_days)
+        else:
+            should_update = last_update > db_last_update
+
+        if should_update:
+            logger.info(f"Updating {table_name} - new data available")
+
+            # Handle single or multiple tables
+            if isinstance(result, tuple) and len(result) == 3:
+                # Multiple tables (like default_spread)
+                truncate_query_1 = f"TRUNCATE TABLE {table_name}_large_firm"
+                truncate_query_2 = f"TRUNCATE TABLE {table_name}_small_firm"
+                db_handler.execute_query(truncate_query_1)
+                db_handler.execute_query(truncate_query_2)
+
+                # Insert data
+                db_handler.execute_query_many(insert_query[0], data_tuple_1)
+                db_handler.execute_query_many(insert_query[1], data_tuple_2)
+            else:
+                # Single table
+                truncate_query = f"TRUNCATE TABLE {table_name}"
+                db_handler.execute_query(truncate_query)
+                db_handler.execute_query_many(insert_query, data_tuples)
+
+            # Update last_update timestamp
+            update_query = f"""
+                UPDATE data_last_update
+                SET last_update = '{last_update}'
+                WHERE data_name = '{data_name}'
+            """
+            db_handler.execute_query(update_query)
+
+            logger.info(f"Successfully updated {table_name}")
+            return jsonify({"status": "Data inserted successfully"}), 200
+        else:
+            logger.info(f"No update needed for {table_name} - data is current")
+            return jsonify({"status": "Data is the same"}), 200
+
+    except Exception as e:
+        logger.error(f"Database error for {table_name}: {str(e)}", exc_info=True)
+        if db_handler:
+            db_handler.rollback()
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+    finally:
+        if db_handler:
+            db_handler.close()
+            logger.debug(f"Database connection closed for {table_name}")
 
 def restructure_data(df):
     restructured_data = []
@@ -31,12 +207,17 @@ def restructure_data(df):
     return restructured_data
 
 @app.route('/stock_info/<ticker_symbol>')
+@handle_errors
 def get_stock_info(ticker_symbol):
+    ticker_symbol = validate_ticker_symbol(ticker_symbol)
+    logger.info(f"Fetching stock info for {ticker_symbol}")
     ticker = yf.Ticker(ticker_symbol)
     return jsonify(ticker.info)
 
 @app.route('/stock_info/tnx')
+@handle_errors
 def get_stock_info_tnx():
+    logger.info("Fetching stock info for ^TNX")
     ticker = yf.Ticker("^TNX")
     return jsonify(ticker.info)
 
@@ -47,42 +228,54 @@ def get_stock_info_tnx():
 #     return jsonify(ticker.calendar)
 
 @app.route('/annual_income_statement/<ticker_symbol>')
+@handle_errors
 def get_annual_income_statement(ticker_symbol):
+    ticker_symbol = validate_ticker_symbol(ticker_symbol)
     ticker = yf.Ticker(ticker_symbol)
     income_statement = ticker.income_stmt
     restructured_data = restructure_data(income_statement)
     return jsonify(restructured_data)
 
 @app.route('/annual_balance_sheet/<ticker_symbol>')
+@handle_errors
 def get_annual_balance_sheet(ticker_symbol):
+    ticker_symbol = validate_ticker_symbol(ticker_symbol)
     ticker = yf.Ticker(ticker_symbol)
     balance_sheet = ticker.balance_sheet
     restructured_data = restructure_data(balance_sheet)
     return jsonify(restructured_data)
 
 @app.route('/annual_cash_flow/<ticker_symbol>')
+@handle_errors
 def get_annual_cash_flow(ticker_symbol):
+    ticker_symbol = validate_ticker_symbol(ticker_symbol)
     ticker = yf.Ticker(ticker_symbol)
     cash_flow = ticker.cash_flow
     restructured_data = restructure_data(cash_flow)
     return jsonify(restructured_data)
 
 @app.route('/quarterly_income_statement/<ticker_symbol>')
+@handle_errors
 def get_quarterly_income_statement(ticker_symbol):
+    ticker_symbol = validate_ticker_symbol(ticker_symbol)
     ticker = yf.Ticker(ticker_symbol)
     income_statement = ticker.quarterly_income_stmt
     restructured_data = restructure_data(income_statement)
     return jsonify(restructured_data)
 
 @app.route('/quarterly_balance_sheet/<ticker_symbol>')
+@handle_errors
 def get_quarterly_balance_sheet(ticker_symbol):
+    ticker_symbol = validate_ticker_symbol(ticker_symbol)
     ticker = yf.Ticker(ticker_symbol)
     balance_sheet = ticker.quarterly_balance_sheet
     restructured_data = restructure_data(balance_sheet)
     return jsonify(restructured_data)
 
 @app.route('/quarterly_cash_flow/<ticker_symbol>')
+@handle_errors
 def get_quarterly_cash_flow(ticker_symbol):
+    ticker_symbol = validate_ticker_symbol(ticker_symbol)
     ticker = yf.Ticker(ticker_symbol)
     cash_flow = ticker.quarterly_cash_flow
     restructured_data = restructure_data(cash_flow)
@@ -91,24 +284,36 @@ def get_quarterly_cash_flow(ticker_symbol):
 
 #has issues with EPS both basic and diluted
 @app.route('/ttm_income_statement/<ticker_symbol>')
+@handle_errors
 def get_ttm_income_statement(ticker_symbol):
+    ticker_symbol = validate_ticker_symbol(ticker_symbol)
     ticker = yf.Ticker(ticker_symbol)
     income_statement = ticker.ttm_income_stmt
     print(income_statement)
     return income_statement.to_json()  
 
 @app.route('/ttm_cash_flow/<ticker_symbol>')
+@handle_errors
 def get_cash_flow(ticker_symbol):
+    ticker_symbol = validate_ticker_symbol(ticker_symbol)
     ticker = yf.Ticker(ticker_symbol)
     cash_flow = ticker.ttm_cashflow
     print(cash_flow)
     return cash_flow.to_json()  
 
 @app.route('/currency_conversion/<source_currency>/<target_currency>/<start_date>/<end_date>')
+@handle_errors
 def get_currency_conversion(source_currency, target_currency, start_date, end_date):
+    # Validate inputs
+    source_currency = validate_currency_code(source_currency)
+    target_currency = validate_currency_code(target_currency)
+    start_date = validate_date_format(start_date)
+    end_date = validate_date_format(end_date)
+
     # Format the currency pair for Yahoo Finance
     currency_pair = f"{source_currency}{target_currency}=X"
-    
+    logger.info(f"Fetching currency conversion for {currency_pair} from {start_date} to {end_date}")
+
     try:
         # Get ticker for the currency pair
         ticker = yf.Ticker(currency_pair)
@@ -143,499 +348,197 @@ def get_currency_conversion(source_currency, target_currency, start_date, end_da
         return jsonify({'error': str(e)}), 500
 
 @app.route('/update_country_risk_premium')
+@handle_errors
 def update_country_risk_premium():
-    data_tuples, error = clean_crp_table()
-    
-    if error:
-        return jsonify({"error": error}), 400
-
-    last_update = getLastUpdate_crp("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Last updated:")
-
-    # Create an instance of DatabaseHandler
-    db_handler = DatabaseHandler()
-
-    # Connect to the database
-    db_handler.connect()
-    db_last_update = db_handler.fetch_query("""SELECT last_update FROM data_last_update WHERE data_name = 'country_risk_premium' """)
-    if db_last_update:
-       db_last_update = db_last_update[0][0]
-    else:
-        return jsonify({"status": "Error getting last_update from table data_last_update"})
-    if last_update > db_last_update:
-        try:
-            # Truncate the table
-            truncate_query = "TRUNCATE TABLE country_risk_premium"
-            db_handler.execute_query(truncate_query)
-
-            # Define SQL insert query
-            insert_query_crp = """
-            INSERT INTO country_risk_premium VALUES (%s, %s, %s, %s, %s, %s)
-            """
-            # Insert data into the database
-            db_handler.execute_query_many(insert_query_crp, data_tuples)
-
-            update_query_data_last_update = f"""
-            UPDATE data_last_update
-            SET last_update = '{last_update}'
-            WHERE data_name = 'country_risk_premium'
-            """
-            db_handler.execute_query(update_query_data_last_update)
-
-        except Exception as e:
-            print(f"An error occurred: {e}")
-            db_handler.rollback()
-    else:
-        # Close the connection
-        db_handler.close()
-        return jsonify({"status": "Data is the same"})
-
-
-    # Close the connection
-    db_handler.close()
-
-    return jsonify({"status": "Data inserted successfully"})
+    return update_database_table(
+        table_name='country_risk_premium',
+        data_name='country_risk_premium',
+        clean_function=clean_crp_table,
+        last_update_function=getLastUpdate_crp,
+        last_update_url="https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html",
+        last_update_text="Last updated:",
+        insert_query="INSERT INTO country_risk_premium VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"
+    )
 
 @app.route('/update_effective_tax_rate')
+@handle_errors
 def update_effective_tax_rate():
-    data_tuples, error = clean_taxRate_table()
-    if error:
-        return jsonify({"error": error}), 400
-
-    last_update = getLastUpdate("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/taxrate.html","Updated")
-
-    # Create an instance of DatabaseHandler
-    db_handler = DatabaseHandler()
-
-    # Connect to the database
-    db_handler.connect()
-    db_last_update = db_handler.fetch_query("""SELECT last_update FROM data_last_update WHERE data_name = 'effective_tax_rate' """)
-    if db_last_update:
-       db_last_update = db_last_update[0][0]
-    else:
-        return jsonify({"status": "Error getting last_update from table data_last_update"})
-    if last_update > db_last_update:
-        try:
-            # Truncate the table
-            truncate_query = "TRUNCATE TABLE effective_tax_rate"
-            db_handler.execute_query(truncate_query)
-
-            # Define SQL insert query
-            insert_query_crp = """
-            INSERT INTO effective_tax_rate VALUES (%s, %s, %s, %s, %s, %s, %s,%s,%s,%s,%s)
-            """
-            # Insert data into the database
-            db_handler.execute_query_many(insert_query_crp, data_tuples)
-
-            update_query_data_last_update = f"""
-            UPDATE data_last_update
-            SET last_update = '{last_update}'
-            WHERE data_name = 'effective_tax_rate'
-            """
-            db_handler.execute_query(update_query_data_last_update)
-
-        except Exception as e:
-            print(f"An error occurred: {e}")
-            db_handler.rollback()
-    else:
-        # Close the connection
-        db_handler.close()
-        return jsonify({"status": "Data is the same"})
-
-
-    # Close the connection
-    db_handler.close()
-
-    return jsonify({"status": "Data inserted successfully"})
+    return update_database_table(
+        table_name='effective_tax_rate',
+        data_name='effective_tax_rate',
+        clean_function=clean_taxRate_table,
+        last_update_function=getLastUpdate,
+        last_update_url="https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/taxrate.html",
+        last_update_text="Updated",
+        insert_query="INSERT INTO effective_tax_rate VALUES (%s, %s, %s, %s, %s, %s, %s,%s,%s,%s,%s)"
+    )
 
 @app.route('/update_sales_to_cap_us')
+@handle_errors
 def update_sales_to_cap_us():
-    data_tuples, error = clean_sales_to_cap_us()
-    if error:
-        return jsonify({"error": error}), 400
-
-    last_update = getLastUpdate("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/capex.html","Last updated")
-    print(last_update)
-    # Create an instance of DatabaseHandler
-    db_handler = DatabaseHandler()
-
-    # Connect to the database
-    db_handler.connect()
-    db_last_update = db_handler.fetch_query("""SELECT last_update FROM data_last_update WHERE data_name = 'sales_to_cap_us' """)
-    if db_last_update:
-       db_last_update = db_last_update[0][0]
-    else:
-        return jsonify({"status": "Error getting last_update from table data_last_update"})
-    if last_update > db_last_update:
-        try:
-            # Truncate the table
-            truncate_query = "TRUNCATE TABLE sales_to_cap_us"
-            db_handler.execute_query(truncate_query)
-
-            # Define SQL insert query
-            insert_query_sales_to_cap_us = """
-            INSERT INTO sales_to_cap_us VALUES (%s, %s, %s, %s, %s, %s, %s,%s,%s,%s)
-            """
-            # Insert data into the database
-            db_handler.execute_query_many(insert_query_sales_to_cap_us, data_tuples)
-
-            update_query_data_last_update = f"""
-            UPDATE data_last_update
-            SET last_update = '{last_update}'
-            WHERE data_name = 'sales_to_cap_us'
-            """
-            db_handler.execute_query(update_query_data_last_update)
-
-        except Exception as e:
-            print(f"An error occurred: {e}")
-            db_handler.rollback()
-    else:
-        # Close the connection
-        db_handler.close()
-        return jsonify({"status": "Data is the same"})
-
-
-    # Close the connection
-    db_handler.close()
-
-    return jsonify({"status": "Data inserted successfully"})
+    return update_database_table(
+        table_name='sales_to_cap_us',
+        data_name='sales_to_cap_us',
+        clean_function=clean_sales_to_cap_us,
+        last_update_function=getLastUpdate,
+        last_update_url="https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/capex.html",
+        last_update_text="Last updated",
+        insert_query="INSERT INTO sales_to_cap_us VALUES (%s, %s, %s, %s, %s, %s, %s,%s,%s,%s)"
+    )
 
 @app.route('/update_beta_us')
+@handle_errors
 def update_beta_us():
-    data_tuples, error = clean_beta_us()
-
-    if error:
-        return jsonify({"error": error}), 400
-
-    last_update = getLastUpdate("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/totalbeta.html","Last Updated in")
-    print(last_update)
-    # Create an instance of DatabaseHandler
-    db_handler = DatabaseHandler()
-
-    # Connect to the database
-    db_handler.connect()
-    db_last_update = db_handler.fetch_query("""SELECT last_update FROM data_last_update WHERE data_name = 'beta_us' """)
-    if db_last_update:
-       db_last_update = db_last_update[0][0]
-    else:
-        return jsonify({"status": "Error getting last_update from table data_last_update"})
-    if last_update > db_last_update:
-        try:
-            # Truncate the table
-            truncate_query = "TRUNCATE TABLE beta_us"
-            db_handler.execute_query(truncate_query)
-
-            # Define SQL insert query
-            insert_query_beta_us= """
-            INSERT INTO beta_us VALUES (%s, %s, %s, %s, %s, %s, %s)
-            """
-            # Insert data into the database
-            db_handler.execute_query_many(insert_query_beta_us, data_tuples)
-
-            update_query_data_last_update = f"""
-            UPDATE data_last_update
-            SET last_update = '{last_update}'
-            WHERE data_name = 'beta_us'
-            """
-            db_handler.execute_query(update_query_data_last_update)
-
-        except Exception as e:
-            print(f"An error occurred: {e}")
-            db_handler.rollback()
-    else:
-        # Close the connection
-        db_handler.close()
-        return jsonify({"status": "Data is the same"})
-
-
-    # Close the connection
-    db_handler.close()
-
-    return jsonify({"status": "Data inserted successfully"})
+    return update_database_table(
+        table_name='beta_us',
+        data_name='beta_us',
+        clean_function=clean_beta_us,
+        last_update_function=getLastUpdate,
+        last_update_url="https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/totalbeta.html",
+        last_update_text="Last Updated in",
+        insert_query="INSERT INTO beta_us VALUES (%s, %s, %s, %s, %s, %s, %s)"
+    )
 
 @app.route('/update_pe_ratio_us')
+@handle_errors
 def update_pe_ratio_us():
-    data_tuples, error = clean_pe_ratio_us()
-
-    if error:
-        return jsonify({"error": error}), 400
-
-    last_update = getLastUpdate("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/pedata.html","Last Updated in")
-
-    # Create an instance of DatabaseHandler
-    db_handler = DatabaseHandler()
-
-    # Connect to the database
-    db_handler.connect()
-    db_last_update = db_handler.fetch_query("""SELECT last_update FROM data_last_update WHERE data_name = 'pe_ratio_us' """)
-    if db_last_update:
-       db_last_update = db_last_update[0][0]
-    else:
-        return jsonify({"status": "Error getting last_update from table data_last_update"})
-    if last_update > db_last_update:
-        try:
-            # Truncate the table
-            truncate_query = "TRUNCATE TABLE pe_ratio_us"
-            db_handler.execute_query(truncate_query)
-
-            # Define SQL insert query
-            insert_query_pe_ratio_us= """
-            INSERT INTO pe_ratio_us VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """
-            # Insert data into the database
-            db_handler.execute_query_many(insert_query_pe_ratio_us, data_tuples)
-
-            update_query_data_last_update = f"""
-            UPDATE data_last_update
-            SET last_update = '{last_update}'
-            WHERE data_name = 'pe_ratio_us'
-            """
-            db_handler.execute_query(update_query_data_last_update)
-
-        except Exception as e:
-            print(f"An error occurred: {e}")
-            db_handler.rollback()
-    else:
-        # Close the connection
-        db_handler.close()
-        return jsonify({"status": "Data is the same"})
-
-
-    # Close the connection
-    db_handler.close()
-
-    return jsonify({"status": "Data inserted successfully"})
+    return update_database_table(
+        table_name='pe_ratio_us',
+        data_name='pe_ratio_us',
+        clean_function=clean_pe_ratio_us,
+        last_update_function=getLastUpdate,
+        last_update_url="https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/pedata.html",
+        last_update_text="Last Updated in",
+        insert_query="INSERT INTO pe_ratio_us VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+    )
 
 
 @app.route('/update_rev_growth_rate')
+@handle_errors
 def update_rev_growth_rate():
-    data_tuples, error = clean_rev_growth_rate()
-
-    if error:
-        return jsonify({"error": error}), 400
-
-    last_update = getLastUpdate("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/histgr.html","Last updated in")
-
-    # Create an instance of DatabaseHandler
-    db_handler = DatabaseHandler()
-
-    # Connect to the database
-    db_handler.connect()
-    db_last_update = db_handler.fetch_query("""SELECT last_update FROM data_last_update WHERE data_name = 'rev_growth_rate' """)
-    if db_last_update:
-       db_last_update = db_last_update[0][0]
-    else:
-        return jsonify({"status": "Error getting last_update from table data_last_update"})
-    if last_update > db_last_update:
-        try:
-            # Truncate the table
-            truncate_query = "TRUNCATE TABLE rev_growth_rate"
-            db_handler.execute_query(truncate_query)
-
-            # Define SQL insert query
-            insert_query_rev_growth_rate= """
-            INSERT INTO rev_growth_rate VALUES (%s, %s, %s, %s, %s, %s, %s)
-            """
-            # Insert data into the database
-            db_handler.execute_query_many(insert_query_rev_growth_rate, data_tuples)
-
-            update_query_data_last_update = f"""
-            UPDATE data_last_update
-            SET last_update = '{last_update}'
-            WHERE data_name = 'rev_growth_rate'
-            """
-            db_handler.execute_query(update_query_data_last_update)
-
-        except Exception as e:
-            print(f"An error occurred: {e}")
-            db_handler.rollback()
-    else:
-        # Close the connection
-        db_handler.close()
-        return jsonify({"status": "Data is the same"})
-
-
-    # Close the connection
-    db_handler.close()
-
-    return jsonify({"status": "Data inserted successfully"})
+    return update_database_table(
+        table_name='rev_growth_rate',
+        data_name='rev_growth_rate',
+        clean_function=clean_rev_growth_rate,
+        last_update_function=getLastUpdate,
+        last_update_url="https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/histgr.html",
+        last_update_text="Last updated in",
+        insert_query="INSERT INTO rev_growth_rate VALUES (%s, %s, %s, %s, %s, %s, %s)"
+    )
 
 @app.route('/update_ebit_growth')
+@handle_errors
 def update_ebit_growth():
-    data_tuples, error = clean_ebit_growth()
-    if error:
-        return jsonify({"error": error}), 400
-
-    last_update = getLastUpdate("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/fundgrEB.html","Last updated in")
-
-    # Create an instance of DatabaseHandler
-    db_handler = DatabaseHandler()
-
-    # Connect to the database
-    db_handler.connect()
-    db_last_update = db_handler.fetch_query("""SELECT last_update FROM data_last_update WHERE data_name = 'ebit_growth' """)
-    if db_last_update:
-       db_last_update = db_last_update[0][0]
-    else:
-        return jsonify({"status": "Error getting last_update from table data_last_update"})
-    if last_update > db_last_update:
-        try:
-            # Truncate the table
-            truncate_query = "TRUNCATE TABLE ebit_growth"
-            db_handler.execute_query(truncate_query)
-
-            # Define SQL insert query
-            insert_query_ebit_growth= """
-            INSERT INTO ebit_growth VALUES (%s, %s, %s, %s, %s)
-            """
-            # Insert data into the database
-            db_handler.execute_query_many(insert_query_ebit_growth, data_tuples)
-
-            update_query_data_last_update = f"""
-            UPDATE data_last_update
-            SET last_update = '{last_update}'
-            WHERE data_name = 'ebit_growth'
-            """
-            db_handler.execute_query(update_query_data_last_update)
-
-        except Exception as e:
-            print(f"An error occurred: {e}")
-            db_handler.rollback()
-    else:
-        # Close the connection
-        db_handler.close()
-        return jsonify({"status": "Data is the same"})
-
-
-    # Close the connection
-    db_handler.close()
-
-    return jsonify({"status": "Data inserted successfully"})
+    return update_database_table(
+        table_name='ebit_growth',
+        data_name='ebit_growth',
+        clean_function=clean_ebit_growth,
+        last_update_function=getLastUpdate,
+        last_update_url="https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/fundgrEB.html",
+        last_update_text="Last updated in",
+        insert_query="INSERT INTO ebit_growth VALUES (%s, %s, %s, %s, %s)"
+    )
 
 
 @app.route('/update_default_spread')
+@handle_errors
 def update_default_spread():
-    data_tuple_big_firm,data_tuple_small_firm, error = clean_default_spread()
-    if error:
-        return jsonify({"error": error}), 400
-
-    # Create structured tuples that match your database schema
-    # Assuming you only need the first 4 elements from each tuple
-    processed_big_firm = [(row[0], row[1], row[2], row[3]) for row in data_tuple_big_firm]
-    processed_small_firm = [(row[0], row[1], row[2], row[3]) for row in data_tuple_small_firm]
-    
-    print("Processed big firm data:", processed_big_firm[:2])  # Print first 2 for verification
-    print("Processed small firm data:", processed_small_firm[:2])
-
-    # Create an instance of DatabaseHandler
-    db_handler = DatabaseHandler()
-
-    # Connect to the database
-    db_handler.connect()
-    db_last_update = db_handler.fetch_query("""SELECT last_update FROM data_last_update WHERE data_name = 'default_spread' """)
-    if db_last_update:
-       db_last_update = db_last_update[0][0]
-    else:
-        return jsonify({"status": "Error getting last_update from table data_last_update"})
-
-
-    current_date = date.today()
-    if current_date - db_last_update > timedelta(days=30):
-        try:
-            # Truncate the table
-            truncate_query_1 = "TRUNCATE TABLE default_spread_large_firm"
-            db_handler.execute_query(truncate_query_1)
-            truncate_query_2 = "TRUNCATE TABLE default_spread_small_firm"
-            db_handler.execute_query(truncate_query_2)
-
-            # Define SQL insert query
-            insert_query_1= """
-            INSERT INTO default_spread_large_firm VALUES (%s, %s, %s, %s)
-            """
-            # Insert data into the database
-            db_handler.execute_query_many(insert_query_1, processed_big_firm) 
-
-            # Define SQL insert query
-            insert_query_2= """
-            INSERT INTO default_spread_small_firm VALUES (%s, %s, %s, %s)
-            """
-            # Insert data into the database
-            db_handler.execute_query_many(insert_query_2, processed_small_firm)  
-
-            update_query_data_last_update = f"""
-            UPDATE data_last_update
-            SET last_update = '{current_date}'
-            WHERE data_name = 'default_spread'
-            """
-            db_handler.execute_query(update_query_data_last_update)
-
-        except Exception as e:
-            print(f"An error occurred: {e}")
-            db_handler.rollback()
-    else:
-        # Close the connection
-        db_handler.close()
-        return jsonify({"status": "Data is the same"})
-
-
-    # Close the connection
-    db_handler.close()
-
-    return jsonify({"status": "Data inserted successfully"})
+    return update_database_table(
+        table_name='default_spread',
+        data_name='default_spread',
+        clean_function=clean_default_spread,
+        last_update_function=None,
+        last_update_url=None,
+        last_update_text=None,
+        insert_query=[
+            "INSERT INTO default_spread_large_firm VALUES (%s, %s, %s, %s)",
+            "INSERT INTO default_spread_small_firm VALUES (%s, %s, %s, %s)"
+        ],
+        use_time_delta=True,
+        delta_days=30
+    )
 
 @app.route('/update_roic')
+@handle_errors
 def update_roic():
-    data_tuples, error = clean_roic_table()
-    if error:
-        return jsonify({"error": error}), 400
+    return update_database_table(
+        table_name='roic',
+        data_name='roic',
+        clean_function=clean_roic_table,
+        last_update_function=getLastUpdate,
+        last_update_url="https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/fundgrEB.html",
+        last_update_text="Last updated in",
+        insert_query="INSERT INTO roic VALUES (%s, %s, %s, %s, %s)"
+    )
 
-    last_update = getLastUpdate("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/fundgrEB.html", "Last updated in")
+@app.route('/update_all')
+@handle_errors
+def update_all():
+    """
+    Run all update functions and return a summary of results
+    """
+    logger.info("Starting batch update for all data sources")
 
-    # Create an instance of DatabaseHandler
-    db_handler = DatabaseHandler()
+    update_functions = [
+        ('country_risk_premium', update_country_risk_premium),
+        ('effective_tax_rate', update_effective_tax_rate),
+        ('sales_to_cap_us', update_sales_to_cap_us),
+        ('beta_us', update_beta_us),
+        ('pe_ratio_us', update_pe_ratio_us),
+        ('rev_growth_rate', update_rev_growth_rate),
+        ('ebit_growth', update_ebit_growth),
+        ('default_spread', update_default_spread),
+        ('roic', update_roic)
+    ]
 
-    # Connect to the database
-    db_handler.connect()
-    db_last_update = db_handler.fetch_query("""SELECT last_update FROM data_last_update WHERE data_name = 'roic' """)
-    print(db_last_update)
-    if db_last_update:
-       db_last_update = db_last_update[0][0]
-    else:
-        return jsonify({"status": "Error getting last_update from table data_last_update"})
-    
-    if last_update > db_last_update:
+    results = {}
+    successful = 0
+    failed = 0
+
+    for name, func in update_functions:
         try:
-            # Truncate the table
-            truncate_query = "TRUNCATE TABLE roic"
-            db_handler.execute_query(truncate_query)
+            logger.info(f"Updating {name}...")
+            response = func()
 
-            # Define SQL insert query
-            insert_query_roic = """
-            INSERT INTO roic VALUES (%s, %s, %s, %s, %s)
-            """
-            # Insert data into the database
-            db_handler.execute_query_many(insert_query_roic, data_tuples)
+            # Handle tuple response (response, status_code)
+            if isinstance(response, tuple):
+                result_data, status_code = response
+                result_json = result_data.get_json()
+            else:
+                result_json = response.get_json()
+                status_code = 200
 
-            update_query_data_last_update = f"""
-            UPDATE data_last_update
-            SET last_update = '{last_update}'
-            WHERE data_name = 'roic'
-            """
-            db_handler.execute_query(update_query_data_last_update)
+            results[name] = {
+                'status': result_json.get('status', 'Unknown'),
+                'success': status_code == 200
+            }
+
+            if status_code == 200:
+                successful += 1
+            else:
+                failed += 1
 
         except Exception as e:
-            print(f"An error occurred: {e}")
-            db_handler.rollback()
-    else:
-        # Close the connection
-        db_handler.close()
-        return jsonify({"status": "Data is the same"})
+            logger.error(f"Error updating {name}: {str(e)}", exc_info=True)
+            results[name] = {
+                'status': f'Error: {str(e)}',
+                'success': False
+            }
+            failed += 1
 
-    # Close the connection
-    db_handler.close()
+    summary = {
+        'total': len(update_functions),
+        'successful': successful,
+        'failed': failed,
+        'results': results
+    }
 
-    return jsonify({"status": "Data inserted successfully"})
+    logger.info(f"Batch update complete: {successful} successful, {failed} failed")
+
+    return jsonify(summary), 200 if failed == 0 else 207  # 207 = Multi-Status
 
 @app.route('/init/last-update')
+@handle_errors
 def initialize_last_update():
     try:
         # Connect to the database
